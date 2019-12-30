@@ -1,0 +1,82 @@
+import numpy as np
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.utils import to_categorical
+import random
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+music_file1 = pd.read_csv("data_music.csv",  encoding = "ISO-8859-1")
+#music_file2 =  pd.read_csv("data_music.csv",  encoding = "ISO-8859-1")
+music_file2 = pd.read_csv("data_music2.csv", encoding= "ISO-8859-1")
+music_total = pd.concat([music_file1,music_file2], ignore_index=True)
+
+music_total = music_total.drop('filename',1)
+music_total = music_total.fillna(music_total.mean())
+
+xData = music_total.iloc[:,:28]
+yData = music_total['label']
+
+
+
+#xData 정규화
+std_scaler = StandardScaler()
+std_scaler.fit(xData)
+xData1 = std_scaler.transform(xData)
+xData1 = pd.DataFrame(xData1, columns=xData.columns, index=list(xData.index.values))
+
+yData = pd.get_dummies(yData) 
+x_train,x_test,y_train,y_test = train_test_split(xData1,yData,random_state=0)
+
+model = Sequential()
+#model.add(Dense(64, input_dim=28, activation='relu'))
+model.add(Dense(16, input_dim=28, activation='relu'))
+model.add(Dense(16, activation='sigmoid'))
+model.add(Dense(10, activation='softmax')) 
+#[ ~,~ , ~,~] 확률로 output이 제공되는데, sofrmax를 사용하면, 모든 값의 합이 1이어야한다.
+#높을 수록 해당 분류에 속할 가능성이 높다.
+#sigmoid는 값으로 제공된다. 
+#relu는 o,x값으로 분류한다.(sigmoid를 적용할 경우, layer수를 늘리게 되면, gradient 방향으로 진행됐을때, 값이 0에 가까워져 예측이 명확하지 않음.)
+
+ 
+
+#model.compile(optimizer='rmsprop', loss='categorical_crossentropy', metrics=['accuracy'])
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+hist = model.fit(x_train, y_train, epochs=100, batch_size=64)
+
+plt.figure(figsize=(8, 4))
+plt.subplot(1, 2, 1)
+plt.plot(hist.history['loss'])
+plt.title("The loss function Graph in train")
+plt.ylabel("The value of loss function")
+plt.subplot(1, 2, 2)
+plt.title("The estimator of performance in train")
+plt.ylabel("The value that is the esitimator of perfromace")
+plt.plot(hist.history['accuracy'], 'b-', label="Learning Performance")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+#https://datascienceschool.net/view-notebook/51e147088d474fe1bf32e394394eaea7/
+#모델 사용
+
+yhat = model.predict(x_test)
+
+yhat[3:4]
+
+y_train[3:4]
+
+yhat[3:4]
+result = yhat[3:4]
+
+labelList = yData.columns
+length = len(labelList)
+index_label = 0 
+for i in labelList:
+    if index_label == np.argmax(result):
+        print("다음 장르는 :",i,)
+    index_label += 1
+ #값이 가장 큰 값 -> 분류에서 1에 가까울 수록, 라벨링, yhat[5:6].max()
