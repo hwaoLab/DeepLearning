@@ -1,0 +1,282 @@
+import numpy as np 
+import pandas as pd 
+'''
+import os
+import matplotlib.pyplot as plt
+%matplotlib inline
+plt.style.use('ggplot')
+import seaborn as sns
+%matplotlib notebook
+'''
+#LSTM은 오래 이전의 값을 보존한다. 이때, cell gate는 학습을 안하고 보존하는값 forget 학습시켜 얼마나 잊을지 
+# https://wikidocs.net/45101 : RNN을 이용한 텍스트 생성(Text Generation using RNN) 
+# https://www.kaggle.com/somang1418/youtube-video-title-generator-by-lstm-eda : Kaggle사이트
+
+from tqdm import tqdm 
+import string
+
+# spacy based imports 
+import spacy
+from spacy.lang.en.stop_words import STOP_WORDS
+from spacy.lang.en import English 
+
+# keras module for building LSTM  
+from keras.preprocessing.sequence import pad_sequences
+from keras.layers import Embedding, LSTM, Dense, Dropout
+from keras.preprocessing.text import Tokenizer 
+from keras.callbacks import EarlyStopping 
+from keras.models import Sequential 
+import keras.utils as ku  
+
+import warnings
+warnings.filterwarnings("ignore")
+
+# spaCy based imports 
+import spacy 
+from spacy.lang.en.stop_words import STOP_WORDS 
+from spacy.lang.en import English  
+
+us_youTube = pd.read_csv("USvideos.csv") 
+#ca_youTube = pd.read_csv("CAvideos.csv")
+#gb_youTube = pd.read_csv("GBvideos.csv")
+
+#파일 읽어온후, 병합 
+#country_youTubeSet = pd.concat([us_youTube,ca_youTube]) 
+#country_youTubeSet = us_youTube
+
+#country_youTubeSet = pd.concat([us_youTube,ca_youTube,gb_youTube]) 
+country_youTubeSet = us_youTube
+#remove duplicate  
+country_youTubeSet= country_youTubeSet.drop_duplicates(['video_id'], keep='first') 
+#dataframe에서 중복값 발생,first occurance만 제외하고 drop시킴
+ 
+country_youTubeSet.video_id.value_counts()[:10] 
+ 
+
+print(type(country_youTubeSet.views[0]))
+country_youTubeSet.describe()
+
+#need to be decoded  country_youTubeSet.category_id.head() 
+ 
+Q1 = country_youTubeSet.views.quantile(0.25)
+Q3 = country_youTubeSet.views.quantile(0.75) 
+# 분위수 조절 
+print(Q3,'\n',Q1)
+IQR = Q3-Q1 
+
+# 기초 통계: IQR(중간에 50%의 데이터들이 흩어진 정도) 
+# 데이터 집합에서 경계값을 포함한 4분위수
+# Q1: 제 1사분위수 / Q2: 중앙값 / Q3: 제 3사분위수/ Q4: 최대값   
+# 중앙값 범위를 IQR이라 할때, 아래 범위를 Q1, 위의 범위를 Q3라고 함
+# 사분위수 범위(IQR, Interquartile range) = Q3 - Q1 
+#안울타리(Inner fence) = Q1 - 1.5 * IQR 과 Q3 + 1.5 * IQR #바깥울타리(Outer fence) = Q1 - 3 * IQR 과 Q3 + 3 * IQR 
+#출처: https://m.blog.naver.com/PostView.nhn?blogId=cooroom&logNo=100206895658&proxyReferer=https %3A%2F%2Fwww.google.com%2F 
+
+popular_videos = country_youTubeSet.loc[country_youTubeSet.views>Q3+1.5*IQR] 
+# 실제 사용되지 않는 셀이지만, 다음 처럼 인기있는 비디오를 추출할 수 있음 
+# 'Q3+1.5*IQR'의 의미  
+# 안울타리(Inner fence)로서 울라티를 벗어난 값을 이상점으로 판단 
+
+country_youTubeSet['popular']=0 
+country_youTubeSet.loc[country_youTubeSet.views > (Q3 + 1.5 * IQR),'popular']=1 
+country_youTubeSet['popular'].value_counts() 
+print('popular video의 비율:',len(country_youTubeSet[country_youTubeSet['popular']==1])/
+      len(country_youTubeSet[country_youTubeSet['popular']==0])*100,' %') 
+# us_youTube dataframe에 popular라는 속성을 만들고 0값으로 초기화 
+# 이후, 이상점(view수가 많은)데이터의 경우, popular속성에 1을 삽입 
+# 결과 적으로  
+ 
+spacy_stopwords = STOP_WORDS 
+print('Number of stop words:%d' % len(spacy_stopwords))
+print('First ten stop words: %s' % list(spacy_stopwords)[:10])
+# 사전에 정의된 stop words  
+# https://medium.com/@makcedward/nlp-pipeline-stop-words-part-5-d6770df8a936 
+
+punctuations = string.punctuation 
+#문장 부호(!@#<>?<) 선별 for 단어만을 뽑아내기 위해, 
+#https://www.geeksforgeeks.org/string-punctuation-in-python/
+#LSTM으로 학습시킬때, 주-목-보 => 보어가 주목에 영향 줄 수 있음
+
+stopwords = list(STOP_WORDS) 
+parser = English()  
+#영어 불용어 리스트를 전환  
+# I, my, me, over, 조사, 접미사 같은 단어들은 문장에서는 자주 등장하지만 실제 의미 분석을 하는데는 거의 기여하는 바가 없습니다. 
+
+new_stopwords= ['trailer','Official','vs','Video' ]
+stopwords.extend(new_stopwords) #append로 넣을 경우, 리스트 형태를 포함해서 들어간다. extend는 값만 들어감
+stopwords
+
+def spacy_tokenizer(sentence):  
+    
+    mytokens = parser(sentence) 
+    #sentence의 type: str -> mytokens의 type: spacy.doc.Doc (parsing과정을 통해, 데이터의 type변경) 
+    #print(mytokens[word_lemma for word in mytokens])   
+    mytokens = [ word.lemma_.lower().strip() if word.lemma_ != "-PRON-" else word.lower_ for word in mytokens ] 
+    #lower() 문자열 내 모든 대문자를 모두 소문자로 변환, strip 문자 양쪽 한칸 이상의 연속된 공백지움
+    #word.lemma는 단어의 원형 형태 ex) is -> be, growing ->grow 
+    #pron -> pronoun 대명사, => 대명사가 아닐경우, 원형+소문자+공백제거 / 대명사 일 경우, 소문자
+    print("1:",mytokens)          
+    mytokens = [ word for word in mytokens if word not in stopwords and word not in punctuations ]   
+    print("2:",mytokens) #stopwords(설정된 금지단어) 와 punctuations(특수 부호)조건 모두에 포함 되지 않은 단어만 추출   
+    mytokens = " ".join([i for i in mytokens]) 
+    # [,,,]로 구분되어있던 token을 다시 문장으로 합침 -> join ""로 했기 때문에 str으로 변경     
+    print("3:",(mytokens)) 
+    return mytokens 
+
+tqdm.pandas() #tqdm.pands 초기화 initialze 
+normal = country_youTubeSet["title"][country_youTubeSet["popular"] == 0].progress_apply(spacy_tokenizer)
+popular = country_youTubeSet["title"][country_youTubeSet["popular"] == 1].progress_apply(spacy_tokenizer) 
+#progress_apply: tqdm을 사용하면 row개수와 row하나를 처리하는데 걸리는 수행시간을 알려줌 
+
+''' 
+ apply 구문 해석 
+ 현재 us_youTube["title"][us_youTube["popular"] == 0] 은 series이며, index값과 value값을 동시에 가진다. 
+ 이때, parser를 바로 해주면, index값에도 동시에 적용되기 때문에, 오류가 발생한다. 
+ 따라서, value값만을 함수에 적용할 필요가 있다. apply함수를 series1.apply(x)로 적용할 경우, 
+ 는 series1의 value 값을 가져온다 
+ 사실, serires1은 youTube데이터(dataframe)에서 속성을 title하라고 지정하였기 때문에,
+ serires로 타입이 변환된다.   
+ 아래 예시를 보면, serires1에서 str값에 해당하는 index를 제외한 반환 값만이 적용된다.   
+ 
+ def test(x):     
+     print(type(x),x) 
+ us_youTube["title"][us_youTube["popular"] == 0].apply(test) 
+ '''
+
+# convert data to sequence of tokens  
+tokenizer = Tokenizer() 
+#tokenize 함수는 어휘 스캐너로서 하나의 인자 readline을 요구  
+def get_sequence_of_tokens(corpus):     
+    ## tokenization          
+    #만약 다음 함수를 쓰면, tokenizer = Tokenizer(num_words=1000)     
+    #=> 가장 빈도가 높은 1,000개의 단어만 선택하도록 Tokenizer 객체를 만든다.         
+    tokenizer.fit_on_texts(corpus)     
+    # 단어 인덱스를 구축합니다. 각각의 단어마다 고유의 index가 할당됨    
+    # => tokenizer.fit_on_texts(samples)    
+    # 문자열을 정수 인덱스의 리스트로 변환합니다.  
+    # => sequences = tokenizer.texts_to_sequences(samples)    
+    total_words = len(tokenizer.word_index) + 1      
+    #전체 단어의 수(인덱스가 0부터이기 때문에, +1을 할경우, 전체 수를 나타낸다.) 
+     ## convert data to sequence of tokens     
+    input_sequences = []          
+    for line in corpus: # n번 반복
+        token_list = tokenizer.texts_to_sequences([line])[0] # 현재 단어에 대한 정수 인코딩 
+        for i in range(1, len(token_list)):          
+            n_gram_sequence = token_list[:i+1]              
+            input_sequences.append(n_gram_sequence)    
+    return input_sequences, total_words 
+ 
+inp_sequences, total_words = get_sequence_of_tokens(popular) 
+print(inp_sequences[:10]) 
+for i in inp_sequences[:10]:    
+    print(i)     
+    print(max(i)) 
+    #print("최대 길이:",max(inp_sequences[:15])) 
+
+def generate_padded_sequences(input_sequences):  #데이터에 대한 패딩
+    max_sequence_len = max([len(x) for x in input_sequences])    
+    #print(type(input_sequences))     
+    input_sequences = np.array(pad_sequences(input_sequences, maxlen=max_sequence_len, padding='pre'))     
+    #자연어 처리에서는 패딩(padding) 작업이라고 하는데, 보통 숫자 0을 넣어서 길이가 다른 샘플들의 길이를 맞춰줍니다    
+    #https://wikidocs.net/32105   
+    #print(input_sequences[:,:-1][0])
+    #예측값: 단어 시퀀스(라벨 다음 단어들)    
+    #print(input_sequences[:,-1])#입력값: 현재 라벨    
+    #print(input_sequences)    
+    predictors, label = input_sequences[:,:-1],input_sequences[:,-1]   
+    print(input_sequences)
+    print("$$$")
+    print(input_sequences[:,:-1])
+    print(type(input_sequences))
+    print(input_sequences[:,-1])
+    '''
+    X = sequences[:,:-1]
+    y = sequences[:,-1]
+    # 리스트의 마지막 값을 제외하고 저장한 것은 X
+    # 리스트의 마지막 값만 저장한 것은 y. 이는 레이블에 해당됨.
+    '''
+    
+    label = ku.to_categorical(label, num_classes=total_words)    
+    #print(label[:,:][50])# 라벨링     
+    #https://www.tensorflow.org/api_docs/python/tf/keras/utils/to_categorical  
+    return predictors, label, max_sequence_len 
+ 
+
+predictors, label, max_sequence_len = generate_padded_sequences(inp_sequences) 
+
+print("predictors:",predictors[0]) 
+print("label:",label[0]) 
+
+def create_model(max_sequence_len, total_words):
+    input_len = max_sequence_len - 1
+    #y데이터를 분리하였기 때문에, x데이터의 길이는 기존 데이터의 길이 -1
+    model = Sequential()
+    
+    # Add Input Embedding Layer
+    model.add(Embedding(total_words, 10, input_length=input_len))
+    #embedding 단어를 벡터화하고, 이 결과값을 LSTM에 집어 넣어줌 
+    #=> 단어를 의미론적 기하공간에 매핑할 수 있도록 벡터화 시킴 
+    
+    # Add Hidden Layer 1 - LSTM Layer
+    model.add(LSTM(100)) #100으 ㅣ은닉 상태 크기를 가진 LSTM
+    model.add(Dropout(0.1))
+    #여러개 매핑을 넣어서, 서로 곱하고 더하여, output h(t)를 고려한다.
+    # => short term memory는 h(t)와h(t-1)만들 고려해도 되지만,      
+    # => long term memory인 LSTM의 경우, cell gate의 복잡성을 더해 4개의 매핑을 만들어 output h(t)를 만들어 낸다.
+     # non-recurrent한 연결만 dropout을 적용하면 과거 중요 정보를 희생하지 않아도 regularization 
+    # Add Output Layer
+    
+    model.add(Dense(total_words, activation='softmax'))
+    #[ ~,~ , ~,~] 확률로 output이 제공되는데, softmax를 사용하면, 모든 값의 합이 1이어야한다.
+    model.compile(loss='categorical_crossentropy', optimizer='adam',metrics=['accuracy'])
+    # 범주형 변수를 예측할떄,2개: binary_crossentropy / 3개 이상: categorical_crossentropy     
+    # loss 비용함수 설정, optimizer 인수로 최적화 알고리즘 설정 
+    return model
+
+model = create_model(max_sequence_len, total_words)
+model.summary()
+model.fit(predictors, label, epochs=300, verbose=2)
+
+#신경망 구현 순서 
+'''
+Keras 를 사용하면 다음과 같은 순서로 신경망을 구성할 수 있다.
+Sequential 모형 클래스 객체 생성
+add 메서드로 레이어 추가. 
+입력단부터 순차적으로 추가한다.
+레이어는 출력 뉴런 갯수를 첫번째 인수로 받는다.
+최초의 레이어는 input_dim 인수로 입력 크기를 설정해야 한다.
+activation 인수로 활성화함수 설정
+compile 메서드로 모형 완성. 
+loss인수로 비용함수 설정
+optimizer 인수로 최적화 알고리즘 설정
+metrics 인수로 트레이닝 단계에서 기록할 성능 기준 설정
+fit 메서드로 트레이닝
+nb_epoch 로 에포크(epoch) 횟수 설정
+batch_size 로 배치크기(batch size) 설정
+verbose는 학습 중 출력되는 문구를 설정하는 것으로, 주피터노트북(Jupyter Notebook)을 사용할 때는 verbose=2로 설정하여 진행 막대(progress bar)가 나오지 않도록 설정한다.
+
+출처: https://datascienceschool.net/view-notebook/51e147088d474fe1bf32e394394eaea7/
+'''
+
+def generate_text(seed_text, next_words, model, max_sequence_len):
+    for _ in range(next_words):  #for _  표시는 단순 반복의미 _나 i나 같은 의미 
+        token_list = tokenizer.texts_to_sequences([seed_text])[0]
+        token_list = pad_sequences([token_list], maxlen=max_sequence_len-1, padding='pre')
+        predicted = model.predict_classes(token_list, verbose=0)
+        #입력한 X(token_list,현재단어)에 대해서 Y를 예측하고 prediced에 저장 
+        output_word = ""
+        for word,index in tokenizer.word_index.items():
+            if index == predicted: #만약 예측한 단어의 인덱스와 동일한 단어가 있다면,
+                output_word = word 
+                #해당 단어word가 예측단어이므로, outword에 넣고 중단 후,
+                #다음 단어로 
+                break
+        seed_text += " "+output_word
+    return seed_text.title()
+
+print (generate_text("Drake", 5, model, max_sequence_len))
+print (generate_text("Kendrick", 5, model, max_sequence_len))
+print (generate_text("BTS", 5, model, max_sequence_len))
+print (generate_text("karaoke ", 5, model, max_sequence_len))
+print (generate_text("samsung", 5, model, max_sequence_len))
+print (generate_text("taylor", 5, model, max_sequence_len))
