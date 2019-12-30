@@ -1,0 +1,388 @@
+### 사용할 패키지 불러오기
+
+import keras
+import numpy as np
+from keras.models import Sequential
+from keras.layers import Dense, LSTM, Dropout, SimpleRNN
+from statsmodels.tsa.arima_process import arma_generate_sample
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+# Epochs 전에 학습을 한 경우, 미리 멈출 수 있음
+es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=20)
+#val_loss가 최소일때, 스탑 이때, 찾더라도 20회 기다려라
+
+## 1. MLP 모델
+
+## 데이터 생성
+
+np.random.seed(12313)
+#time series: 데이터를 수집할때, 동일한 간격, 동일한 주기로 뽑아내야한다. 
+
+
+# [0, 1, 2, 3] , window_size = 2      =>   [ [0, 1], [1, 2], [2, 3] ]
+def create_dataset(signal_data, window_size=1): #window_size =1은 default값
+    dataX, dataY = [], []
+    for i in range(len(signal_data)-window_size):
+        dataX.append(signal_data[i:(i+window_size)])
+        dataY.append(signal_data[i + window_size])
+    return np.array(dataX), np.array(dataY)
+
+# arima 파라미터 설정
+arparams = np.array([.75, -.25])
+print(arparams)
+maparams = np.array([.65, .35])
+ar = np.r_[1, -arparams] # add zero-lag and negate
+print(ar)
+
+# np.r_이란?
+# 두 배열을 왼쪽에서 오른쪽으로 붙이기 
+# np.r_[a, b] = [a] +[b]
+
+ma = np.r_[1, maparams] # add zero-lag
+print(ma)
+
+
+#AR: 자기회귀(Autoregression). 이전 관측값의 오차항이 이후 관측값에 영향을 주는 모형이다.(이전의 관측값의 영향-단일값)
+#AR = > windowsize: 입력값  *실험결과 windowsize가 어느 정도 크기 내에서 클수록 예측력이 좋음
+# =>자기 상관성 
+#MA: 이동평균(Moving Average). 관측값이 이전의 연속적인 오차항의 영향을 받는다는 모형이다.  (이전의 연속적인 오차하의 영향-추세)
+
+signal_data = arma_generate_sample(ar, ma, 10000)   
+
+# arima 데이터 생성
+# arma_generate_sample(ar=ar, ma=ma, nsample=n)
+print(len(signal_data)) # => 10,000개 생성
+
+signal_data = signal_data[8900: ] # 앞에 값을 조금 자름 
+print(len(signal_data))
+
+plt.figure(figsize=(15, 5))
+plt.plot(signal_data)
+plt.show()
+
+## 데이터 전처리
+
+# MinMaxScalar
+maxValue = np.max(signal_data)
+minValue = np.min(signal_data)
+signal_data = (signal_data - minValue) / (maxValue - minValue)
+# 모든 데이터는 normalization 추천(why? 학습시에 발산하는 것을 방지 할 수 있다.)
+
+plt.figure(figsize=(15, 5))
+# plt.plot(signal_data[0:300])
+plt.plot(signal_data)
+plt.show()
+
+# 데이터 분리
+train = signal_data[0:800]
+val = signal_data[800:900]
+test = signal_data[900:]
+
+window_size = 9
+print(len(signal_data)-window_size)
+
+#window_size가 왜 9일까. 9개와 그다음 10번째를 매핑할때, 잘 맞는지 체크할 것이다.
+# (시행착오, 경헝적인 방법으로 입력값을 조절할 수 밖에 없음)
+# 따라서, create_dataset에서 for 문이 작동하는 횟수가 len(signal_data)-window_size이다. 
+# 왜냐하면, 맨뒤의 9개는 예측을 위한 input값이 없어진다.  
+
+# 데이터셋 생성
+x_train, y_train = create_dataset(train, window_size)
+x_val, y_val = create_dataset(val, window_size)
+x_test, y_test = create_dataset(test, window_size)
+# -> 출력:yt / 입력: yt-1, yt-2 ... ... 
+print(y_train[0 : 5])
+print(len(signal_data))
+
+## MLP 모델 구성 및 생성
+
+model1 = Sequential()
+model1.add(Dense(32, input_dim = window_size, activation = 'relu'))
+model1.add(Dense(16, activation = 'relu'))
+model1.add(Dense(8, activation = 'relu'))
+
+
+# layer가 많을 수록 값에 대한 손실이 크고 backpropagation에서 최초 layer에 도달할 확률이 떨어진다.
+# => Relu함수는 sigmoid 함수보다 gradient search(미분방향 최적화)에서 손실이 작다.
+# ReLU 함수는 그림에 있는 것처럼 0보다 작을 때는 0을 사용하고, 0보다 큰 값에 대해서는 해당 값을 그대로 사용하는 방법이다. 
+# 음수에 대해서는 값이 바뀌지만, 양수에 대해서는 값을 바꾸지 않는다.
+model1.add(Dense(4, activation = 'relu'))
+model1.add(Dense(1))
+# 해당 예측 모델(prediction model)에서 출려값은 1개이다. 9개의 데이터(n ~n+9)를 가지고 다음 10번째 데이터(n+10)를 예측한다.
+
+model1.summary()
+
+model1.compile(optimizer = 'adam', loss = 'mean_squared_error') 
+#Adam(lr=0.001)로 설정하여, 학습률을 조절할 수 있다./Adam
+
+hist = model1.fit(x_train, y_train, epochs = 500, 
+                  batch_size = 16, shuffle = False, callbacks=[es], validation_data = (x_val, y_val))
+# hist = model1.fit(x_train, y_train, epochs = 500, 
+#                   batch_size = 16, validation_data=(x_val, y_val), 
+#                   shuffle = False, callbacks=[es])
+# 시계열 문제는 deterministic 한 수학적 모델이 아니다. 내제된 많은 오류값이 있을 수 있다. 따라서, 관계성이 명확하게 나올 수 없다.
+
+## MLP 모델 평가
+
+# 6. 모델 평가하기
+trainScore = model1.evaluate(x_train, y_train, batch_size=16, verbose=0)
+print('Train Score: ', trainScore)
+
+testScore = model1.evaluate(x_test, y_test, batch_size=16, verbose=0)
+print('Test Score: ', testScore)
+
+# verbose는 console에 출력하는 형태를 결정한다. verbose= 1,2,3~ 옵션 선택 가능
+# Train score는 훈련 데이터 셋의 정확도/ Test score은 테스트 셋의 정확도 =>유사했을때, 이상적이고 test가 크면 과대적합
+
+plt.plot(hist.history['loss'], c = 'r', label = 'loss')
+plt.legend(loc = 'best')
+plt.show()
+
+
+# 모델 평가
+model1_pred = model1.predict(x_test, batch_size = 16)
+# fitting에서 batch_size는 데이터를 예측할때, 16개에 한번씩 평가를 하고 가중치를 개선한다.
+# predict에서는 예측할 데이터 묶음을 몇 번에 한 번씩 할 것인지 결정한다. 
+
+print(model1_pred[0:10])
+print(model1_pred)
+
+# 모델 평가
+model1_pred = model1.predict(x_test, batch_size = 16)
+print(model1_pred[0:10])
+
+plt.figure(figsize = (15, 5))
+plt.plot(model1_pred, 'b')
+plt.plot(y_test, 'y')
+plt.show()
+
+# 2. LSTM 모델
+
+## 데이터셋 생성 및 전처리
+
+'''
+LSTM(Long Short Term Model)은 RNN의 확장 버전이다.
+기존의 RNN 모데일이 이전 값의 영향을 많이 받는 특징을 가지고 있어 오래된 값을 보존하는데 어려움이 있다.
+LSTM은 따로 cell gate를 만들어, 기존의 변수를 보존하고 가중치가 매겨진 변수에 영향을 주는 식으로 작동한다.
+=> 순차적인 데이터에서 과거의 값들이 영향을 줄 수 있다. 
+'''
+
+
+
+# window_size = 10
+# 데이터셋 생성
+x_train, y_train = create_dataset(train, window_size)
+x_test, y_test = create_dataset(test, window_size)
+
+print(x_train.shape)
+
+
+# 데이터셋 전처리
+x_train = x_train.reshape(x_train.shape[0], x_train.shape[1], 1)
+print(x_train.shape)
+x_val = x_val.reshape(x_val.shape[0], x_val.shape[1], 1)
+x_test = x_test.reshape(x_test.shape[0], x_test.shape[1], 1)
+
+
+## 손실 이력 저장 클래스
+
+class CustomHistory(keras.callbacks.Callback):
+    def init(self):
+        self.train_loss = []
+        self.val_loss = []
+        
+    def on_epoch_end(self, batch, logs={}):
+        self.train_loss.append(logs.get('loss'))
+        self.val_loss.append(logs.get('val_loss'))
+
+
+## LSTM 모델 생성
+
+history = CustomHistory() # 손실 이력 객체 생성
+history.init()
+def fit_lstm(x_train, y_train, x_val, batch_size, nb_epoch, neurons):
+  import time
+  from time import strftime
+  start_time = time.time()
+  
+  
+  
+  model = Sequential()
+  
+#   LSTM(output_dim, input_shape = ((window_size, input_dim)), stateful=True) [LSTM 상태유지 스택 쌓기]
+#   for i in range(3):
+#       model.add(LSTM(16, batch_input_shape=(batch_size, x_train.shape[1], x_train.shape[2]), stateful=True, return_sequences=True))
+#   model.add(LSTM(neurons, stateful=True, batch_input_shape=(batch_size, x_train.shape[1], x_train.shape[2]), return_sequences = False))
+
+  model.add(LSTM(neurons, input_shape=(x_train.shape[1], x_train.shape[2]), return_sequences = False))
+  model.add(Dense(1))
+# input shape=(input_length 윈도우 사이즈 크기,input_Dimension 속성을 여러개 둘 수 있음)
+# return_sequences는 default파라미터 / stateful이 true이면, cellgate가 다음 cell에 영향을 준다 
+
+# 즉,MLP는 속성input_Dimension만 볼수 있지만, LSTM은 input_Dimension과 윈도우 사이즈 크기를 고려할 수 있다.
+  print(model.summary())
+  model.compile(loss='mean_squared_error', optimizer='adam')
+  model.fit(x_train, y_train, epochs=nb_epoch, batch_size=batch_size, verbose=1, shuffle=False, callbacks=[history, es], validation_data = (x_val, y_val))
+  
+#   for i in range(nb_epoch): [상태유지 사용할 때 model의 상태를 reset하기 위해 사용]
+#       temp_time = time.time()
+#       model.fit(x_train, y_train, epochs=1, batch_size=batch_size, verbose=0, shuffle=False, callbacks=[history])
+#       model.reset_states()
+#       print(str(i + 1) + ' epoch \n걸린 시간(second) : ', time.time() - temp_time)
+
+  print('\n걸린 시간(second) : ', time.time() - start_time)
+  return model
+
+# 5. 모델 학습시키기
+num_epochs = 500
+
+model2 = fit_lstm(x_train, y_train, x_val, 16, num_epochs, 8)
+#output dimentsion은 16개
+
+## LSTM 모델 평가
+
+# 5. 학습과정 살펴보기
+plt.plot(history.train_loss)
+plt.plot(history.val_loss)
+
+plt.ylim(0.0, 0.05)
+plt.ylabel('loss')
+plt.xlabel('epoch')
+plt.legend(['train'], loc='upper left')
+plt.show()
+
+# 6. 모델 평가
+trainScore = model2.evaluate(x_train, y_train, batch_size=1, verbose=0)
+model2.reset_states()
+print('Train Score: ', trainScore)
+
+testScore = model2.evaluate(x_test, y_test, batch_size=1, verbose=0)
+model2.reset_states()
+print('Test Score: ', testScore)
+
+
+# 7. 모델 사용 -- 바로 다음 값 예측
+model2_pred = model2.predict(x_test, batch_size = 1)
+model2.reset_states()
+
+
+plt.figure(figsize=(17,5))
+plt.plot(model2_pred[0 : 100],'r',label="prediction")
+plt.plot(y_test[0 : 100], 'y', label="test function")
+plt.legend()
+plt.show()
+
+## RNN 모델
+
+model3 = Sequential()
+model3.add(SimpleRNN(8, input_shape = (x_train.shape[1], x_train.shape[2])))
+model3.add(Dense(1))
+
+model3.compile(loss='mse', optimizer = 'adam')
+
+history = model3.fit(x_train, y_train, epochs=500, shuffle = False, callbacks = [es],  validation_data = (x_val, y_val))
+
+plt.plot(history.history["loss"])
+plt.plot(history.history["val_loss"])
+plt.ylim(0, 0.05)
+plt.title("Loss")
+plt.show()
+
+# 6. 모델 평가
+trainScore = model3.evaluate(x_train, y_train, batch_size=1, verbose=0)
+print('Train Score: ', trainScore)
+
+testScore = model3.evaluate(x_test, y_test, batch_size=1, verbose=0)
+print('Test Score: ', testScore)
+
+plt.figure(figsize = (15, 5))
+plt.plot(y_train, 'r', label="target")
+plt.plot(model3.predict(x_train), 'b', label="output")
+
+plt.legend()
+plt.show()
+
+plt.figure(figsize = (15, 5))
+plt.plot(y_test, 'r', label="target")
+plt.plot(model3.predict(x_test), 'b', label="output")
+plt.legend()
+plt.show()
+
+# 정규분포 데이터 추가
+
+signal_data = arma_generate_sample(ar, ma, 10000)   # arima 데이터 생성
+signal_data = signal_data[8900: ]
+normal_data = np.random.normal(size = 1100)
+print(normal_data[0:10])
+
+# [0, 1, 2, 3] , window_size = 2      =>   [ [0, 1], [1, 2], [2, 3] ]
+def create_dataset2(signal_data, normal_data, window_size=1):
+    dataX, dataY = [], []
+    for i in range(len(signal_data)-window_size):
+        dataX.append(list(zip(signal_data[i:(i+window_size)], normal_data[i:(i+window_size)])))
+        dataY.append(signal_data[i + window_size])
+    return np.array(dataX), np.array(dataY)
+
+# MinMaxScalar
+maxValue = np.max(signal_data)
+minValue = np.min(signal_data)
+signal_data = (signal_data - minValue) / (maxValue - minValue)
+
+
+# 데이터 분리
+train = signal_data[0:800]
+val = signal_data[800:900]
+test = signal_data[900:]
+
+window_size = 2# 데이터셋 생성
+x_train, y_train = create_dataset2(train, normal_data, window_size)
+x_val, y_val = create_dataset2(val, normal_data, window_size)
+x_test, y_test = create_dataset2(test, normal_data, window_size)
+
+history = CustomHistory() # 손실 이력 객체 생성
+history.init()
+def fit_lstm(x_train, y_train, batch_size, nb_epoch, neurons):
+  import time
+  from time import strftime
+  start_time = time.time()
+  
+  
+  
+  model = Sequential()
+  model.add(LSTM(neurons, input_shape=(x_train.shape[1], x_train.shape[2]), return_sequences = False))
+  model.add(Dense(1))
+  print(model.summary())
+  model.compile(loss='mean_squared_error', optimizer='adam')
+  model.fit(x_train, y_train, epochs=nb_epoch, batch_size=batch_size, verbose=1, shuffle=False, callbacks=[history, es], validation_data = (x_val, y_val))
+  print('\n걸린 시간(second) : ', time.time() - start_time)
+  return model
+
+# 5. 모델 학습시키기
+num_epochs = 200
+
+model4 = fit_lstm(x_train, y_train, 16, num_epochs, 8)
+
+# 6. 모델 평가
+trainScore = model4.evaluate(x_train, y_train, batch_size=1, verbose=0)
+print('Train Score: ', trainScore)
+
+testScore = model4.evaluate(x_test, y_test, batch_size=1, verbose=0)
+print('Test Score: ', testScore)
+
+plt.figure(figsize=(15, 5))
+plt.plot(history.train_loss,label = 'train_loss')
+plt.plot(history.val_loss, label = 'val_loss')
+plt.ylim(0, 0.01)
+plt.legend()
+plt.title("Loss")
+
+plt.show()
+
+plt.figure(figsize = (15, 5))
+plt.plot(y_test, 'r', label="target")
+plt.plot(model4.predict(x_test), 'b', label="output")
+plt.legend()
+plt.show()
+
